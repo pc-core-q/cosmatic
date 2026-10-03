@@ -1,5 +1,5 @@
 /* ==========================================================================
-   products.js (النسخة المحسنة — أداء فائق وسرعة ظهور بدون استهلاك الباقات)
+   products.js (النسخة المحسنة — ألوان متباعدة بوضوح تحت الصورة)
    ========================================================================== */
 
 function productMediaHtml(product) {
@@ -461,53 +461,44 @@ async function initProductDetailPage() {
   const hasLegacyVariants = !hasMatrix && product.variants && product.variants.length > 0;
   const productAvailable = !!product.available;
 
-  // إعداد العرض المباشر للصور (سلايدر السحب)
+  // صورة واحدة مباشرة
   let galleryHtml = "";
   if (product.image) {
-    let allImages = [product.image];
-    if (product.images && product.images.length > 0) {
-      allImages = allImages.concat(product.images);
-    }
-    
-    galleryHtml += '<div style="display: flex; overflow-x: auto; scroll-snap-type: x mandatory; gap: 10px; padding-bottom: 8px; scrollbar-width: none;">';
-    allImages.forEach(function(imgUrl, index) {
-      const idAttr = index === 0 ? 'id="mainProductDetailImage"' : '';
-      galleryHtml += '<img ' + idAttr + ' src="' + escapeHtml(imgUrl) + '" alt="' + escapeHtml(product.name) + '" style="width: 100%; flex-shrink: 0; scroll-snap-align: start; aspect-ratio: 1 / 1; object-fit: cover; border-radius: 16px; border: 1px solid var(--line-strong);">';
-    });
-    galleryHtml += '</div>';
-    
-    if (allImages.length > 1) {
-      galleryHtml += '<div style="text-align: center; font-size: 0.85rem; color: var(--ink-400); margin-top: -4px; margin-bottom: 12px;">اسحب لرؤية باقي الصور ⟷</div>';
-    }
+    galleryHtml = '<div class="detail-gallery"><img id="mainProductDetailImage" src="' + escapeHtml(product.image) + '" alt="' + escapeHtml(product.name) + '" class="detail-gallery-img"></div>';
   } else {
     const cat = Store.getCategories().find(function (c) { return c.id === product.categoryId; });
     const key = cat ? cat.icon : "box";
     galleryHtml = '<div class="placeholder-icon" style="height: 100%; display: flex; align-items: center; justify-content: center; background: var(--olive-50); border-radius: 16px;">' + iconSvg(key) + "</div>";
   }
 
-  let matrixHtml = "";
+  // قسم اختيار الألوان يوضع تحت الصورة بمسافات وهوامش واضحة ومتباعدة
+  let colorsHtml = "";
   if (hasColors) {
-    matrixHtml +=
-      '<div class="field" style="margin-bottom:16px;">' +
-        '<label style="display:block;margin-bottom:8px;font-weight:600;">اللون:</label>' +
-        '<div id="colorSwatches" style="display:flex;flex-wrap:wrap;gap:10px;">' +
+    colorsHtml =
+      '<div class="detail-media-colors" style="margin-top:24px; padding:4px 0;">' +
+        '<div class="color-head" style="margin-bottom:12px; font-size:.95rem;">' +
+          '<span class="color-label" style="color:var(--ink-500);">اللون:</span> ' +
+          '<strong id="selectedColorLabel" class="color-name" style="color:var(--olive-900); font-weight:700;">' + escapeHtml(product.colors[0] ? product.colors[0].name : "") + '</strong>' +
+        '</div>' +
+        '<div id="colorSwatches" class="color-swatches-wrap" style="display:flex; flex-wrap:wrap; gap:16px; align-items:center;">' +
           product.colors.map(function (c, i) {
             const bg = c.hex || "#ccc";
-            return '<button type="button" class="color-swatch" data-color="' + escapeHtml(c.name) + '" title="' + escapeHtml(c.name) + '" ' +
-              'style="width:36px;height:36px;border-radius:50%;border:2px solid ' + (i === 0 ? "var(--olive-700)" : "var(--line-strong)") + ';background:' + escapeHtml(bg) + ';cursor:pointer;"></button>';
+            return '<button type="button" class="color-swatch' + (i === 0 ? " is-selected" : "") + '" data-color="' + escapeHtml(c.name) + '" title="' + escapeHtml(c.name) + '" ' +
+              'style="background:' + escapeHtml(bg) + '; width:42px; height:42px; border-radius:50%; border:2px solid #fff; padding:0; cursor:pointer; flex-shrink:0;"></button>';
           }).join('') +
         '</div>' +
-        '<div id="selectedColorLabel" style="margin-top:6px;font-size:.85rem;color:var(--ink-600);">' + escapeHtml(product.colors[0] ? product.colors[0].name : "") + '</div>' +
       '</div>';
   }
+
+  // قسم المقاسات (يبقى في تفاصيل المنتج بالأسفل)
+  let sizesHtml = "";
   if (hasSizes) {
-    matrixHtml +=
+    sizesHtml =
       '<div class="field" style="margin-bottom:16px;">' +
         '<label style="display:block;margin-bottom:8px;font-weight:600;">المقاس:</label>' +
         '<div id="sizeButtons" style="display:flex;flex-wrap:wrap;gap:8px;">' +
           product.sizes.map(function (sz, i) {
-            return '<button type="button" class="size-btn" data-size="' + escapeHtml(sz) + '" ' +
-              'style="padding:8px 16px;border-radius:8px;border:1px solid ' + (i === 0 ? "var(--olive-700)" : "var(--line-strong)") + ';background:' + (i === 0 ? "var(--olive-50)" : "var(--white)") + ';cursor:pointer;font-weight:600;">' + escapeHtml(sz) + '</button>';
+            return '<button type="button" class="size-btn' + (i === 0 ? " is-selected" : "") + '" data-size="' + escapeHtml(sz) + '">' + escapeHtml(sz) + '</button>';
           }).join('') +
         '</div>' +
       '</div>';
@@ -538,7 +529,11 @@ async function initProductDetailPage() {
   const initiallyOutOfStock = !productAvailable || initialStock <= 0;
 
   mount.innerHTML =
-    '<div class="detail-grid"><div class="detail-media">' + galleryHtml + "</div>" +
+    '<div class="detail-grid">' +
+      '<div class="detail-media">' +
+        galleryHtml +
+        colorsHtml +
+      '</div>' +
       '<div class="detail-info">' +
         '<span class="product-cat">' + escapeHtml(Store.getCategoryName(product.categoryId)) + "</span>" +
         "<h1>" + escapeHtml(product.name) + "</h1>" +
@@ -549,7 +544,7 @@ async function initProductDetailPage() {
           '<div id="descFade" style="position:absolute; bottom:0; left:0; right:0; height:40px; background:linear-gradient(transparent, var(--cream));"></div>' +
         '</div>' +
         '<button id="descToggle" style="background:none; border:none; color:var(--olive-700); font-weight:700; font-size:0.9rem; padding:4px 0; margin-bottom:12px; cursor:pointer;">قراءة المزيد ↓</button>' +
-        matrixHtml +
+        sizesHtml +
         legacyVariantsHtml +
         '<div class="qty-stepper" id="qtyStepperWrap" style="' + (initiallyOutOfStock ? "display:none;" : "") + '"><button type="button" id="qtyMinus">−</button><input type="number" id="qtyInput" value="1" min="1" max="' + Math.max(initialStock, 1) + '"><button type="button" id="qtyPlus">+</button></div>' +
         '<div class="detail-actions" id="detailActions">' +
@@ -559,7 +554,8 @@ async function initProductDetailPage() {
           ) +
         "</div>" +
         '<div class="detail-meta"><span>القسم: ' + escapeHtml(Store.getCategoryName(product.categoryId)) + '</span><span id="availabilityMeta">حالة التوفر: ' + (initiallyOutOfStock ? "غير متوفر" : "متوفر") + '</span></div>' +
-      "</div></div>";
+      "</div>" +
+    "</div>";
 
   let selectedColor = hasColors ? product.colors[0].name : null;
   let selectedSize = hasSizes ? product.sizes[0] : null;
@@ -623,8 +619,8 @@ async function initProductDetailPage() {
     colorSwatches.querySelectorAll(".color-swatch").forEach(function (btn) {
       btn.addEventListener("click", function () {
         selectedColor = btn.dataset.color;
-        colorSwatches.querySelectorAll(".color-swatch").forEach(function (b) { b.style.borderColor = "var(--line-strong)"; });
-        btn.style.borderColor = "var(--olive-700)";
+        colorSwatches.querySelectorAll(".color-swatch").forEach(function (b) { b.classList.remove("is-selected"); });
+        btn.classList.add("is-selected");
         const label = document.getElementById("selectedColorLabel");
         if (label) label.textContent = selectedColor;
         const colorObj = product.colors.find(function (c) { return c.name === selectedColor; });
@@ -645,11 +641,9 @@ async function initProductDetailPage() {
       btn.addEventListener("click", function () {
         selectedSize = btn.dataset.size;
         sizeButtons.querySelectorAll(".size-btn").forEach(function (b) {
-          b.style.borderColor = "var(--line-strong)";
-          b.style.background = "var(--white)";
+          b.classList.remove("is-selected");
         });
-        btn.style.borderColor = "var(--olive-700)";
-        btn.style.background = "var(--olive-50)";
+        btn.classList.add("is-selected");
         refreshAvailabilityUI();
       });
     });
