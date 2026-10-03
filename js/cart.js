@@ -1,10 +1,9 @@
 /* ==========================================================================
    cart.js
-   منطق صفحة السلة (cart.html) فقط — محمي بالتحقق من وجود #cartItems حتى
-   يمكن تضمين الملف بأمان دون أن يؤثر على صفحات أخرى.
+   منطق صفحة السلة (cart.html) فقط.
+   تم التحديث: تطبيق دالة getIkUrl لتقليل استهلاك الباقة بطلب صور مصغرة.
    ========================================================================== */
 
-// صورة سطر السلة: صورة اللون المحدد إن وُجدت، وإلا صورة الخيار النصي القديم، وإلا صورة المنتج
 function cartLineMediaUrl(line, product) {
   if (line.color && product.colors && product.colors.length) {
     const c = product.colors.find(function (cc) { return cc.name === line.color; });
@@ -16,7 +15,6 @@ function cartLineMediaUrl(line, product) {
   return product.image || null;
 }
 
-// نص وصف الخيار المعروض بجانب اسم المنتج في السلة (لون/مقاس أو خيار نصي قديم)
 function cartLineVariantLabel(line) {
   const parts = [];
   if (line.color) parts.push(line.color);
@@ -27,8 +25,10 @@ function cartLineVariantLabel(line) {
 
 function cartLineHtml(line, product, unavailable) {
   const mediaUrl = cartLineMediaUrl(line, product);
-  const media = mediaUrl
-    ? '<img src="' + escapeHtml(mediaUrl) + '" alt="' + escapeHtml(product.name) + '">'
+  // هنا التعديل: نطلب صورة بحجم 150 بكسل فقط للسلة
+  const optimizedMediaUrl = typeof window.getIkUrl === 'function' ? window.getIkUrl(mediaUrl, 150, 70) : mediaUrl;
+  const media = optimizedMediaUrl
+    ? '<img src="' + escapeHtml(optimizedMediaUrl) + '" alt="' + escapeHtml(product.name) + '">'
     : '<div class="placeholder-icon-wrap">' + iconSvg(
         (Store.getCategories().find(function (c) { return c.id === product.categoryId; }) || {}).icon || "box"
       ) + "</div>";
@@ -79,7 +79,6 @@ function renderCartPage() {
     const variantStock = Store.getVariantStock(product, line.color, line.size);
     const unavailable = !product.available || variantStock <= 0;
     if (unavailable) {
-      // لا يدخل في المجموع ولا في الطلب (يتطابق مع getOrderableCartLines في whatsapp.js)
       hasUnavailable = true;
       rows.push(cartLineHtml(line, product, true));
       return;
@@ -127,8 +126,16 @@ function stepCartQty(itemKey, delta) {
   if (!line) return;
   const product = Store.getProduct(line.productId);
   if (!product) return;
+  
   const maxStock = Store.getVariantStock(product, line.color, line.size);
-  const next = Math.max(1, Math.min(maxStock, line.qty + delta));
+  const next = line.qty + delta;
+  
+  if (next > maxStock) {
+      if (typeof showToast === "function") showToast("عذراً، هذه هي الكمية القصوى المتوفرة.", "error");
+      return;
+  }
+  if (next < 1) return;
+
   Store.setQty(itemKey, next);
   renderCartPage();
 }
@@ -139,9 +146,17 @@ function setCartQty(itemKey, value) {
   if (!line) return;
   const product = Store.getProduct(line.productId);
   if (!product) return;
+  
   const maxStock = Store.getVariantStock(product, line.color, line.size);
   let qty = parseInt(value, 10) || 1;
-  qty = Math.max(1, Math.min(maxStock, qty));
+  
+  if (qty > maxStock) {
+      qty = maxStock;
+      if (typeof showToast === "function") showToast("تم ضبط الكمية إلى الحد الأقصى المتوفر (" + maxStock + ").", "error");
+  } else if (qty < 1) {
+      qty = 1;
+  }
+  
   Store.setQty(itemKey, qty);
   renderCartPage();
 }
@@ -149,13 +164,13 @@ function setCartQty(itemKey, value) {
 function removeCartLine(itemKey) {
   Store.removeFromCart(itemKey);
   renderCartPage();
+  if (typeof showToast === "function") showToast("تم إزالة المنتج من السلة", "success");
 }
 
 async function initCartPage() {
   const checkoutBtn = document.getElementById("checkoutBtn");
   if (!checkoutBtn) return;
 
-  // السلة لا تحتاج كل المنتجات؛ نجلب فقط المنتجات الموجودة فعليًا في السلة.
   const cartLines = Store.getCart();
   if (cartLines.length && typeof Store.loadProductById === "function") {
     await Promise.all(cartLines.map(function(line) { return Store.loadProductById(line.productId); }));
@@ -163,7 +178,7 @@ async function initCartPage() {
   checkoutBtn.addEventListener("click", function () {
     if (!Store.getCart().length) return;
     if (!isWhatsAppConfigured()) {
-      showToast("لم يتم إعداد رقم واتساب بعد. الرجاء إضافته من لوحة التحكم ← الإعدادات.");
+      if (typeof showToast === "function") showToast("لم يتم إعداد رقم واتساب بعد. الرجاء إضافته من لوحة التحكم ← الإعدادات.", "error");
       return;
     }
     orderCartViaWhatsApp();

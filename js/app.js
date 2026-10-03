@@ -1,11 +1,9 @@
 /* ==========================================================================
    app.js
-   منطق مشترك بين كل صفحات المتجر: رسم الهيدر والفوتر ديناميكيًا من الإعدادات
-   المخزّنة، القائمة على الجوال، عداد السلة، ورسائل التوست.
+   منطق مشترك بين كل صفحات المتجر: رسم الهيدر والفوتر، القائمة، الإشعارات.
    ========================================================================== */
 
 /* ---------- أدوات التهريب المشتركة (متاحة لكل الصفحات) ---------- */
-// تهريب نص قبل إدخاله في innerHTML (محتوى نصي أو قيمة سمة داخل علامات اقتباس)
 function escapeHtml(str) {
   if (str === null || str === undefined) return "";
   return String(str)
@@ -16,22 +14,33 @@ function escapeHtml(str) {
     .replace(/'/g, "&#039;");
 }
 
-// تحويل قيمة إلى وسيط نصي آمن داخل onclick="fn(...)": يعالج علامات الاقتباس والأحرف الخاصة
-// مثال: '<button onclick="removeCartLine(' + jsStr(key) + ')">'
 function jsStr(value) {
   return escapeHtml(JSON.stringify(String(value === null || value === undefined ? "" : value)));
 }
 
+// ====== الحيلة العبقرية لـ ImageKit ======
+// هذه الدالة تتدخل في الرابط وتطلب المقاس المطلوب بدقة، مما يوفر الباقة ويزيد الجودة!
+window.getIkUrl = function(url, width, quality) {
+  if (!url || typeof url !== 'string' || !url.includes("ik.imagekit.io")) return url;
+  quality = quality || 85;
+  const trString = "tr:w-" + width + ",q-" + quality + ",f-auto";
+  if (url.match(/\/tr:[^\/]+\//)) {
+    return url.replace(/\/tr:[^\/]+\//, "/" + trString + "/");
+  } else {
+    return url.replace(/(ik\.imagekit\.io\/[^\/]+\/)/, "$1" + trString + "/");
+  }
+};
+// ==========================================
+
 const NAV_LINKS = [
   { href: "index.html", label: "الرئيسية", key: "home", icon: "home" },
   { href: "products.html", label: "المنتجات", key: "products", icon: "box" },
-  { href: "categories.html", label: "الأقسام", key: "categories", icon: "layers" }, // صفحة الأقسام المستقلة
+  { href: "categories.html", label: "الأقسام", key: "categories", icon: "layers" }, 
   { href: "about.html", label: "من نحن", key: "about", icon: "info" },
   { href: "contact.html", label: "تواصل معنا", key: "contact", icon: "phone" }
 ];
 
 function initSidebarDOM() {
-  // إنشاء الخلفية الشفافة والقائمة الجانبية مباشرة في الـ body لتجنب مشاكل الطبقات (z-index)
   if (!document.getElementById("mainSidebarOverlay")) {
       const overlay = document.createElement("div");
       overlay.id = "mainSidebarOverlay";
@@ -117,7 +126,6 @@ function renderSidebarNav(activeKey) {
   const allCategories = Store.getCategories();
   const mainCategories = allCategories.filter(c => !c.parentId);
 
-  // التحقق إن كان المستخدم حالياً داخل صفحة المتجر products.html
   const isShopPage = window.location.pathname.endsWith("products.html");
 
   if (mainCategories.length > 0) {
@@ -226,7 +234,8 @@ function initGlobalSearch() {
       }
 
       resultsBox.innerHTML = matched.map(p => {
-          const img = p.image ? `<img src="${escapeHtml(p.image)}" alt="${escapeHtml(p.name)}">` : `<div class="search-img-placeholder">${iconSvg("box")}</div>`;
+          // جلب صورة مصغرة للبحث باستخدام الدالة الجديدة
+          const img = p.image ? `<img src="${escapeHtml(window.getIkUrl(p.image, 150, 70))}" alt="${escapeHtml(p.name)}">` : `<div class="search-img-placeholder">${iconSvg("box")}</div>`;
           return `
               <a href="product.html?id=${encodeURIComponent(p.id)}" class="search-result-item">
                   <div class="search-item-img">${img}</div>
@@ -305,26 +314,58 @@ function updateCartBadge() {
   el.style.display = count > 0 ? "flex" : "none";
 }
 
-function showToast(message) {
+function showToast(message, type = 'success') {
   let toast = document.getElementById("appToast");
   if (!toast) {
     toast = document.createElement("div");
     toast.id = "appToast";
-    toast.className = "toast";
     document.body.appendChild(toast);
   }
+  
   toast.textContent = message;
-  toast.classList.add("show");
+  toast.className = "toast show";
+  
+  if (type === 'success') {
+      toast.classList.add("toast-success");
+  } else if (type === 'error') {
+      toast.classList.add("toast-error");
+  }
+
   clearTimeout(toast._timer);
   toast._timer = setTimeout(function () { toast.classList.remove("show"); }, 2400);
 }
 
-function fixRelativePaths(scope) { /* no-op: flat file structure */ }
+function initBackToTop() {
+  let btn = document.getElementById("backToTopBtn");
+  if (!btn) {
+    btn = document.createElement("button");
+    btn.id = "backToTopBtn";
+    btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;display:block;margin:auto;"><polyline points="18 15 12 9 6 15"></polyline></svg>';
+    btn.setAttribute("aria-label", "العودة للأعلى");
+    btn.title = "العودة للأعلى";
+    document.body.appendChild(btn);
+  }
+  
+  window.addEventListener("scroll", function() {
+    if (window.scrollY > 400) {
+      btn.style.display = "block";
+    } else {
+      btn.style.display = "none";
+    }
+  });
+
+  btn.addEventListener("click", function() {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+}
+
+function fixRelativePaths(scope) { /* no-op */ }
 
 document.addEventListener("DOMContentLoaded", function () {
   renderHeader();
   renderFooter();
   updateCartBadge();
+  initBackToTop();
 });
 document.addEventListener("cart:updated", updateCartBadge);
 document.addEventListener("store:synced", function () {
