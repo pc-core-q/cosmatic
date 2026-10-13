@@ -1,7 +1,8 @@
 /* ==========================================================================
    admin.js
    منطق لوحة تحكم الأدمن بالكامل (admin.html). 
-   تم التحديث: دعم الصور المتعددة مع ميزة الحذف الفردي، تصحيح حفظ الألوان، ونظام الطلبات.
+   تم التحديث: دعم الباركود (SKU)، مزامنة الأسعار والمخزون من ملفات Excel و CSV عبر SheetJS،
+   وتقييد رفع الصور بحد أقصى 4MB لمنع استهلاك الباقة وبطء المعالجة.
    ========================================================================== */
 
 let editingProductId = null;
@@ -10,9 +11,9 @@ let editingAdId = null;
 let pendingProductImage = null; 
 let pendingCategoryImage = null; 
 let pendingAdImage = null; 
-let pendingColors = [];      // [{ name, hex, image }]
-let pendingSizes = [];       // ["S", "M", ...]
-let pendingInventory = {};   // { "لون||مقاس": qty }
+let pendingColors = [];        // [{ name, hex, image }]
+let pendingSizes = [];         // ["S", "M", ...]
+let pendingInventory = {};     // { "لون||مقاس": qty }
 
 /* ---------------------------------------------------------------------- */
 /* ملاحظة: escapeHtml و jsStr معرّفتان في app.js (يُحمَّل قبل هذا الملف)   */
@@ -55,25 +56,160 @@ async function initAdminPage() {
   wireCategoryModal();
   wireAdModal(); 
   wireSettingsForm();
+  wireExcelSync(); // تفعيل استيراد ومزامنة الإكسل
 
   const productSearch = document.getElementById("adminProductSearch");
   if (productSearch) productSearch.addEventListener("input", renderProductsTable);
 }
 
 /* ---------------------------------------------------------------------- */
+/* مزامنة واستيراد الأسعار والمخزون عبر ملفات Excel / CSV                 */
+/* ---------------------------------------------------------------------- */
+
+function wireExcelSync() {
+  const fileInput = document.getElementById("excelSyncInput") || document.querySelector('input[type="file"][accept=".xlsx, .xls, .csv"]');
+  if (!fileInput) return;
+
+  fileInput.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    try {
+      // 1. قراءة الملف
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data);
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+
+      if (rows.length === 0) {
+        alert("الملف فارغ أو لا يحتوي على بيانات مقروءة.");
+        return;
+      }
+
+      // 2. سحب المنتجات الحالية من الكاش/Firebase
+      let products = Store.getProducts();
+      let updatedCount = 0;
+      let addedCount = 0;
+
+      // دالة مساعدة للبحث عن العمود باختلاف المسميات (عربي/إنجليزي)
+      const getVal = (row, possibleKeys) => {
+        for (let key of possibleKeys) {
+          const foundKey = Object.keys(row).find(k => k.trim().toLowerCase() === key.toLowerCase());
+          if (foundKey && row[foundKey] !== "") return row[foundKey];
+        }
+        return null;
+      };
+
+      const barcodeKeys = ["الباركود", "باركود", "كود المادة", "كود", "barcode", "sku"];
+      const nameKeys = ["اسم المنتج", "الاسم", "المادة", "name"];
+      const priceKeys = ["السعر", "سعر البيع", "سعر المفرد", "price"];
+      const stockKeys = ["الكمية", "المخزون", "الرصيد", "stock", "qty"];
+
+      rows.forEach(row => {
+        const barcodeVal = getVal(row, barcodeKeys)?.toString().trim();
+        const nameVal = getVal(row, nameKeys)?.toString().trim();
+        let priceVal = parseFloat(getVal(row, priceKeys));
+        let stockVal = parseInt(getVal(row, stockKeys), 10);
+
+        if (isNaN(priceVal)) priceVal = 0;
+        if (isNaN(stockVal)) stockVal = 0;
+
+        // تجاوز الصف إذا لم يكن يحتوي على اسم أو باركود
+        if (!nameVal && !barcodeVal) return; 
+
+        // البحث عن المنتج هل هو موجود مسبقاً؟
+        let existingProduct = products.find(p => 
+          (barcodeVal && (p.barcode === barcodeVal || p.sku === barcodeVal || p.id === barcodeVal)) ||
+          (nameVal && p.name === nameVal)
+        );
+
+        if (existingProduct) {
+          // --- التحديث (المنتج موجود) ---
+          existingProduct.price = priceVal;
+          existingProduct.stock = stockVal;
+          if (barcodeVal && !existingProduct.barcode) {
+            existingProduct.barcode = barcodeVal;
+            existingProduct.sku = barcodeVal;
+          }
+          updatedCount++;
+        } else {
+          // --- الإضافة (منتج جديد كلياً) ---
+          if (!nameVal) return; // الاسم شرط أساسي لإضافة منتج جديد
+          
+          const newProduct = {
+            id: uid("prd"), // توليد معرّف فريد للمنتج
+            name: nameVal,
+            barcode: barcodeVal || "",
+            sku: barcodeVal || "",
+            price: priceVal,
+            stock: stockVal,
+            categoryId: "", // يُترك فارغاً مبدئياً ليقوم الأدمن بتصنيفه لاحقاً
+            available: true,
+            featured: false,
+            isNew: true, // تمييزه كمنتج جديد
+            isOffer: false,
+            image: "",
+            images: [],
+            colors: [],
+            sizes: [],
+            inventory: {}
+          };
+          products.push(newProduct);
+          addedCount++;
+        }
+      });
+
+      // 3. حفظ التعديلات في Firebase و LocalStorage
+      await Store.saveProducts(products);
+      
+      alert(`تمت العملية بنجاح!\n- تم تحديث سعر/كمية: ${updatedCount} منتج\n- تمت إضافة: ${addedCount} منتج جديد`);
+      
+      // 4. إعادة رسم جدول المنتجات في لوحة التحكم
+      if (typeof renderProductsTable === "function") {
+        renderProductsTable();
+      }
+      
+    } catch (error) {
+      console.error("Excel import error:", error);
+      alert("حدث خطأ أثناء قراءة الملف. تأكد من أن الملف بصيغة Excel صالحة وأن الأعمدة مطابقة.");
+    } finally {
+      fileInput.value = ""; // تصفير الحقل لاختيار نفس الملف مجدداً إن لزم الأمر
+    }
+  });
+}
+/* ---------------------------------------------------------------------- */
 /* رفع الصور ومعالجتها الذكية بدقة عالية عبر ImageKit CDN                 */
 /* ---------------------------------------------------------------------- */
 
 async function uploadToImgBB(file, isBanner = false) {
+  if (!file) throw new Error("لم يتم اختيار ملف");
+
+  // 1. فحص الحد الأقصى لحجم الصورة (4 ميغابايت)
+  const MAX_SIZE_MB = 4;
+  const MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024;
+
+  if (file.size > MAX_SIZE_BYTES) {
+    const currentMB = (file.size / (1024 * 1024)).toFixed(1);
+    const errorMsg = `حجم الصورة كبير جداً (${currentMB}MB)! الحد الأقصى المسموح به هو ${MAX_SIZE_MB}MB.`;
+    showToast(errorMsg, "error");
+    throw new Error(errorMsg);
+  }
+
+  // 2. التحقق من صيغة الملف (أن يكون صورة فقط)
+  if (!file.type || !file.type.startsWith("image/")) {
+    const errorMsg = "الملف المختار ليس صورة صالحة!";
+    showToast(errorMsg, "error");
+    throw new Error(errorMsg);
+  }
+
   const apiKey = (typeof STORE_CONFIG !== "undefined" && STORE_CONFIG.imgbbApiKey || "").trim();
-  if (!apiKey) {
+  if (!apiKey || apiKey === "YOUR_IMGBB_KEY") {
     throw new Error("لم يتم إعداد مفتاح ImgBB بعد. أضِف imgbbApiKey في js/config.js لتفعيل رفع الصور.");
   }
 
   const formData = new FormData();
   formData.append("image", file);
 
-  // 1. الرفع الفعلي لـ ImgBB
   const response = await fetch("https://api.imgbb.com/1/upload?key=" + encodeURIComponent(apiKey), {
     method: "POST",
     body: formData
@@ -87,25 +223,21 @@ async function uploadToImgBB(file, isBanner = false) {
   const rawUrl = data.data.url;
   const imageKitEndpoint = (typeof STORE_CONFIG !== "undefined" && STORE_CONFIG.imageKitEndpoint || "").trim().replace(/\/+$/, "");
 
-  // إن لم يتم إعداد ImageKit، نستخدم رابط ImgBB مباشرة
-  if (!imageKitEndpoint) {
+  if (!imageKitEndpoint || imageKitEndpoint.includes("YOUR_ID")) {
     return rawUrl;
   }
 
-  // 2. مطابقة رابط ImgBB
   const match = rawUrl.match(/^https?:\/\/i\.ibb\.co\/(.+)$/);
   if (!match) {
     return rawUrl;
   }
 
   const transform = isBanner
-    ? "tr:w-1200,q-90,f-auto"   // البنر يكفيه 800 بكسل بجودة 75
-    : "tr:w-800,q-85,f-auto";  // صور المنتجات 450 بكسل بجودة 70 ممتازة جداً وتزن 25KB فقط
-  
-  // 4. بناء الرابط النهائي عبر ImageKit CDN
+    ? "tr:w-1400,q-90,f-webp"
+    : "tr:w-900,q-85,f-webp";
+
   return imageKitEndpoint + "/" + transform + "/" + match[1];
 }
-
 
 /* ---------------------------------------------------------------------- */
 /* التنقّل بين الأقسام وإدارة القائمة الجانبية                            */
@@ -120,7 +252,6 @@ function wireSidebarNav() {
       document.querySelectorAll(".admin-panel-view").forEach(function (p) { p.style.display = "none"; });
       document.getElementById("panel-" + btn.dataset.panel).style.display = "block";
       
-      // إغلاق القائمة الجانبية بعد اختيار القسم (للموبايل أو القائمة المسحوبة)
       const sidebar = document.querySelector(".admin-sidebar");
       const overlay = document.querySelector(".sidebar-overlay");
       if (sidebar) sidebar.classList.remove("active", "open");
@@ -129,7 +260,6 @@ function wireSidebarNav() {
   });
 }
 
-// دالة لفتح وإغلاق القائمة الجانبية للأدمن
 window.toggleAdminSidebar = function() {
   const sidebar = document.querySelector('.admin-sidebar');
   const overlay = document.querySelector('.sidebar-overlay');
@@ -139,7 +269,7 @@ window.toggleAdminSidebar = function() {
 };
 
 /* ---------------------------------------------------------------------- */
-/* لوحة الإحصائيات                                                      */
+/* لوحة الإحصائيات                                                       */
 /* ---------------------------------------------------------------------- */
 
 function renderStats() {
@@ -170,11 +300,15 @@ function renderProductsTable() {
   let products = Store.getProducts();
   if (query.trim()) {
     const q = query.trim().toLowerCase();
-    products = products.filter(function (p) { return p.name.toLowerCase().includes(q); });
+    products = products.filter(function (p) { 
+      return (p.name && p.name.toLowerCase().includes(q)) || 
+             (p.barcode && String(p.barcode).toLowerCase().includes(q)) || 
+             (p.sku && String(p.sku).toLowerCase().includes(q)); 
+    });
   }
 
   if (!products.length) {
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--ink-300);">لا توجد منتجات</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:30px;color:var(--ink-300);">لا توجد منتجات</td></tr>';
     return;
   }
 
@@ -182,15 +316,19 @@ function renderProductsTable() {
     const img = p.image ? '<img src="' + p.image + '">' : '<div class="admin-table-icon">' + iconSvg("box") + "</div>";
     const statusPill = Store.isProductAvailable(p)
       ? '<span class="pill pill-ok">متوفر</span>'
-      : '<span class="pill pill-off">غير متوفر</span>';
+      : '<span class="pill pill-off" style="color: #dc2626; background: #fee2e2; border: 1px solid #fca5a5; font-weight: bold;">غير متوفر</span>';
+
     const tags = [];
     if (p.featured) tags.push("مميز");
     if (p.isNew) tags.push("جديد");
     if (p.isOffer) tags.push("عرض🔥"); 
 
+    const barcodeDisplay = p.barcode || p.sku ? `<span style="font-family:monospace; background:var(--olive-50); padding:3px 8px; border-radius:6px; border:1px solid var(--line); font-size:0.85rem;">${escapeHtml(p.barcode || p.sku)}</span>` : '<span style="color:var(--ink-300); font-size:0.85rem;">—</span>';
+
     return (
       "<tr>" +
         "<td>" + img + "</td>" +
+        "<td>" + barcodeDisplay + "</td>" +
         "<td>" + escapeHtml(p.name) + (tags.length ? ' <span class="field-hint" style="color:var(--danger);">(' + tags.join(" / ") + ")</span>" : "") + "</td>" +
         "<td>" + escapeHtml(Store.getCategoryName(p.categoryId)) + "</td>" +
         "<td>" + formatPrice(p.price) + "</td>" +
@@ -280,7 +418,6 @@ function renderColorsList() {
       const oldName = pendingColors[idx].name;
       const newName = this.value;
 
-      // تحديث مفاتيح المخزون تلقائياً حتى لا تضيع الكميات المدخلة عند تغيير اسم اللون
       if (oldName && oldName !== newName) {
           Object.keys(pendingInventory).forEach(function(key) {
               if (key.startsWith(oldName + "||")) {
@@ -413,7 +550,7 @@ function wireProductModal() {
         showToast("تم رفع الصورة بنجاح!", "success");
       } catch (error) {
         console.error("Upload Error:", error);
-        showToast("فشل رفع الصورة. يرجى التأكد من اتصال الإنترنت.", "error");
+        showToast(error.message || "فشل رفع الصورة.", "error");
       }
     });
   }
@@ -432,7 +569,6 @@ function wireProductModal() {
   const addColorBtn = document.getElementById("addColorBtn");
   if (addColorBtn) {
     addColorBtn.addEventListener("click", function () {
-      // إعطاء اسم افتراضي فوراً بمجرد النقر لمنع المشاكل
       const defaultName = "لون " + (pendingColors.length + 1);
       pendingColors.push({ name: defaultName, hex: "#7c9a4c", image: null });
       renderColorsList();
@@ -445,18 +581,17 @@ function wireProductModal() {
   }
 }
 
-// دالة حذف صورة إضافية بشكل فردي
 window.removeExtraImage = function(index) {
-    if (!confirm("هل أنت متأكد من حذف هذه الصورة؟")) return;
-    if (editingProductId) {
-        const p = Store.getProduct(editingProductId);
-        if (p && p.images) {
-            p.images.splice(index, 1);
-            Store.updateProduct(editingProductId, { images: p.images });
-            openProductModal(editingProductId); // تحديث العرض في النافذة
-            showToast("تم حذف الصورة الإضافية", "success");
-        }
+  if (!confirm("هل أنت متأكد من حذف هذه الصورة؟")) return;
+  if (editingProductId) {
+    const p = Store.getProduct(editingProductId);
+    if (p && p.images) {
+      p.images.splice(index, 1);
+      Store.updateProduct(editingProductId, { images: p.images });
+      openProductModal(editingProductId);
+      showToast("تم حذف الصورة الإضافية", "success");
     }
+  }
 };
 
 function openProductModal(productId) {
@@ -474,7 +609,6 @@ function openProductModal(productId) {
 
   const preview = document.getElementById("productImagePreview");
   
-  // إعادة تعيين حقل الصور الإضافية
   const extraImagesInput = document.getElementById("productExtraImagesInput");
   const extraImagesPreview = document.getElementById("extraImagesPreview");
   if (extraImagesInput) extraImagesInput.value = "";
@@ -483,8 +617,9 @@ function openProductModal(productId) {
   if (productId) {
     const p = Store.getProduct(productId);
     title.textContent = "تعديل المنتج";
+    if (document.getElementById("productBarcode")) document.getElementById("productBarcode").value = p.barcode || p.sku || "";
     document.getElementById("productName").value = p.name;
-    document.getElementById("productDescription").value = p.description;
+    document.getElementById("productDescription").value = p.description || "";
     document.getElementById("productPrice").value = p.price;
     document.getElementById("productCategorySelect").value = p.categoryId;
     document.getElementById("productStock").value = p.stock;
@@ -497,14 +632,13 @@ function openProductModal(productId) {
     pendingProductImage = p.image || null;
     preview.innerHTML = p.image ? '<img src="' + p.image + '">' : iconSvg("box");
     
-    // عرض الصور الإضافية إن وجدت مع زر الحذف الفردي لكل صورة
     if (p.images && p.images.length > 0 && extraImagesPreview) {
-        extraImagesPreview.innerHTML = p.images.map((img, idx) => `
-            <div style="position:relative; display:inline-block; margin-left:10px; margin-bottom:10px;">
-                <img src="${img}" style="width: 60px; height: 60px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line-strong);">
-                <button type="button" onclick="removeExtraImage(${idx})" title="حذف الصورة" style="position:absolute; top:-6px; right:-6px; background:var(--danger); color:#fff; border:none; border-radius:50%; width:22px; height:22px; font-size:14px; cursor:pointer; display:flex; align-items:center; justify-content:center; box-shadow:0 2px 4px rgba(0,0,0,0.2);">×</button>
-            </div>
-        `).join('');
+      extraImagesPreview.innerHTML = p.images.map((img, idx) => `
+        <div style="position:relative; display:inline-block; margin-left:10px; margin-bottom:10px;">
+          <img src="${img}" style="width: 60px; height: 60px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line-strong);">
+          <button type="button" onclick="removeExtraImage(${idx})" title="حذف الصورة" style="position:absolute; top:-6px; right:-6px; background:var(--danger); color:#fff; border:none; border-radius:50%; width:22px; height:22px; font-size:14px; cursor:pointer; display:flex; align-items:center; justify-content:center; box-shadow:0 2px 4px rgba(0,0,0,0.2);">×</button>
+        </div>
+      `).join('');
     }
 
     pendingColors = (p.colors || []).map(function (c) { return Object.assign({}, c); });
@@ -514,6 +648,7 @@ function openProductModal(productId) {
     renderColorsList();
   } else {
     title.textContent = "إضافة منتج جديد";
+    if (document.getElementById("productBarcode")) document.getElementById("productBarcode").value = "";
     document.getElementById("productAvailable").checked = true;
     preview.innerHTML = iconSvg("box");
 
@@ -529,19 +664,17 @@ function closeProductModal() {
   editingProductId = null;
 }
 
-// دالة حفظ المنتج
 async function saveProductForm(e) {
   e.preventDefault();
 
-  // 1. تصحيح الألوان: إعطاء اسم افتراضي للون لتجنب حذفه إذا نسي المستخدم كتابة الاسم
   const cleanColors = pendingColors
     .filter(function (c) { return (c.name && c.name.trim()) || c.image || c.hex !== "#7c9a4c"; })
     .map(function (c, idx) {
-        return {
-            name: (c.name && c.name.trim()) ? c.name.trim() : ("لون " + (idx + 1)),
-            hex: c.hex || "#7c9a4c",
-            image: c.image || null
-        };
+      return {
+        name: (c.name && c.name.trim()) ? c.name.trim() : ("لون " + (idx + 1)),
+        hex: c.hex || "#7c9a4c",
+        image: c.image || null
+      };
     });
 
   const cleanSizes = currentSizesFromInput();
@@ -564,42 +697,44 @@ async function saveProductForm(e) {
     totalStock = sum;
   }
 
-  // رفع الصور الإضافية
   const extraImagesInput = document.getElementById("productExtraImagesInput");
   let extraImagesUrls = [];
 
-  // جلب الصور القديمة إذا كنا في وضع التعديل
   if (editingProductId) {
-      const existingProduct = Store.getProduct(editingProductId);
-      if (existingProduct && existingProduct.images) {
-          extraImagesUrls = existingProduct.images;
-      }
+    const existingProduct = Store.getProduct(editingProductId);
+    if (existingProduct && existingProduct.images) {
+      extraImagesUrls = existingProduct.images;
+    }
   }
 
   if (extraImagesInput && extraImagesInput.files.length > 0) {
-      showToast("جاري رفع الصور الإضافية، يرجى الانتظار...");
-      const uploadPromises = Array.from(extraImagesInput.files).map(file => uploadToImgBB(file, false));
+    showToast("جاري رفع الصور الإضافية، يرجى الانتظار...");
+    const uploadPromises = Array.from(extraImagesInput.files).map(file => uploadToImgBB(file, false));
 
-      try {
-          const uploadedUrls = await Promise.all(uploadPromises);
-          extraImagesUrls = extraImagesUrls.concat(uploadedUrls.filter(url => url !== null));
-      } catch (err) {
-          showToast("حدث خطأ أثناء رفع الصور الإضافية", "error");
-          console.error(err);
-      }
+    try {
+      const uploadedUrls = await Promise.all(uploadPromises);
+      extraImagesUrls = extraImagesUrls.concat(uploadedUrls.filter(url => url !== null));
+    } catch (err) {
+      showToast(err.message || "حدث خطأ أثناء رفع الصور الإضافية", "error");
+      console.error(err);
+      return;
+    }
   }
 
-  // 2. تصحيح الصور: تعيين صورة رئيسية تلقائياً من الصور الإضافية أو صور الألوان إذا نسيها المستخدم
   if (!pendingProductImage) {
-      if (extraImagesUrls.length > 0) {
-          pendingProductImage = extraImagesUrls.shift(); // جعل أول صورة إضافية هي الرئيسية
-      } else if (cleanColors.length > 0) {
-          const colorImg = cleanColors.find(c => c.image);
-          if (colorImg) pendingProductImage = colorImg.image;
-      }
+    if (extraImagesUrls.length > 0) {
+      pendingProductImage = extraImagesUrls.shift();
+    } else if (cleanColors.length > 0) {
+      const colorImg = cleanColors.find(c => c.image);
+      if (colorImg) pendingProductImage = colorImg.image;
+    }
   }
+
+  const barcodeVal = document.getElementById("productBarcode") ? document.getElementById("productBarcode").value.trim() : "";
 
   const data = {
+    barcode: barcodeVal,
+    sku: barcodeVal, // حفظ كـ barcode و sku لضمان التوافق مع أي تسمية
     name: document.getElementById("productName").value.trim(),
     description: document.getElementById("productDescription").value.trim(),
     price: Number(document.getElementById("productPrice").value) || 0,
@@ -613,7 +748,7 @@ async function saveProductForm(e) {
     sizes: cleanSizes,
     inventory: cleanInventory,
     image: pendingProductImage,
-    images: extraImagesUrls // حفظ مصفوفة الصور الإضافية
+    images: extraImagesUrls
   };
 
   if (!data.name || !data.categoryId) {
@@ -635,7 +770,7 @@ async function saveProductForm(e) {
 }
 
 /* ---------------------------------------------------------------------- */
-/* الأقسام                                                              */
+/* الأقسام                                                               */
 /* ---------------------------------------------------------------------- */
 
 function renderCategoriesTable() {
@@ -700,7 +835,6 @@ function populateIconPicker() {
   });
 }
 
-// يميّز الأيقونة المختارة بصريًا (الحقل نفسه مخفي بالـ CSS)
 function syncIconPickerActive() {
   document.querySelectorAll("#categoryIconPicker .icon-choice").forEach(function (label) {
     const input = label.querySelector("input");
@@ -731,7 +865,7 @@ function wireCategoryModal() {
         showToast("تم الرفع بنجاح!", "success");
       } catch (error) {
         console.error("Upload Error:", error);
-        showToast("فشل رفع الصورة.", "error");
+        showToast(error.message || "فشل رفع الصورة.", "error");
       }
     });
   }
@@ -810,7 +944,6 @@ function saveCategoryForm(e) {
   const name = document.getElementById("categoryName").value.trim();
   const parentId = document.getElementById("categoryParent") ? document.getElementById("categoryParent").value : "";
   const iconInput = document.querySelector('input[name="categoryIcon"]:checked');
-  // إن لم تُحدَّد أيقونة (مثلاً قسم قديم بأيقونة غير موجودة في القائمة) نحافظ على أيقونته الحالية
   const existing = editingCategoryId ? Store.getCategories().find(function (c) { return c.id === editingCategoryId; }) : null;
   const icon = iconInput ? iconInput.value : ((existing && existing.icon) || "box");
 
@@ -830,7 +963,7 @@ function saveCategoryForm(e) {
 }
 
 /* ---------------------------------------------------------------------- */
-/* الإعلانات                                                            */
+/* الإعلانات                                                             */
 /* ---------------------------------------------------------------------- */
 
 function renderAdsTable() {
@@ -893,7 +1026,7 @@ function wireAdModal() {
         showToast("تم رفع الإعلان بنجاح!", "success");
       } catch (error) {
         console.error("Upload Error:", error);
-        showToast("فشل رفع الصورة.", "error");
+        showToast(error.message || "فشل رفع الصورة.", "error");
       }
     });
   }

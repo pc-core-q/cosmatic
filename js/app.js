@@ -1,6 +1,7 @@
 /* ==========================================================================
    app.js
    منطق مشترك بين كل صفحات المتجر: رسم الهيدر والفوتر، القائمة، الإشعارات.
+   تم التحديث: بحث عام خفيف بنظام الدفعات يدعم الباركود ويوفر باندويث Firebase.
    ========================================================================== */
 
 /* ---------- أدوات التهريب المشتركة (متاحة لكل الصفحات) ---------- */
@@ -19,11 +20,11 @@ function jsStr(value) {
 }
 
 // ====== الحيلة العبقرية لـ ImageKit ======
-// هذه الدالة تتدخل في الرابط وتطلب المقاس المطلوب بدقة، مما يوفر الباقة ويزيد الجودة!
+// تجبر السيرفر دائماً على تسليم صيغة WebP فائقة النقاء والصغر بدلاً من JPEG
 window.getIkUrl = function(url, width, quality) {
   if (!url || typeof url !== 'string' || !url.includes("ik.imagekit.io")) return url;
   quality = quality || 85;
-  const trString = "tr:w-" + width + ",q-" + quality + ",f-auto";
+  const trString = "tr:w-" + width + ",q-" + quality + ",f-webp";
   if (url.match(/\/tr:[^\/]+\//)) {
     return url.replace(/\/tr:[^\/]+\//, "/" + trString + "/");
   } else {
@@ -84,7 +85,10 @@ function renderHeader() {
         '<nav class="main-nav" id="mainNav" aria-label="التنقل الرئيسي">' + navHtml + '</nav>' +
         '<div class="header-actions">' +
           '<button type="button" class="btn-icon" id="openGlobalSearch" aria-label="بحث" title="بحث">' + iconSvg("search") + '</button>' +
-          '<a href="cart.html" class="btn-icon cart-link" aria-label="السلة" title="السلة">' + iconSvg("cart") + '<span class="cart-count" id="cartCount">0</span></a>' +
+          '<a href="cart.html" class="btn-icon cart-link" id="headerCartBtn" aria-label="السلة" title="السلة">' + 
+            iconSvg("cart") + 
+            '<span class="cart-count" id="cartCount" style="display:none;"></span>' +
+          '</a>' +
           '<button class="btn-icon nav-toggle" id="navToggle" aria-label="القائمة">' + iconSvg("menu") + '</button>' +
         '</div>' +
       '</div>' +
@@ -93,7 +97,7 @@ function renderHeader() {
       '<div class="global-search-container">' +
         '<div class="global-search-header">' +
           '<div class="search-box" style="flex:1;margin:0;">' +
-            '<input type="text" id="globalSearchInput" placeholder="ابحث عن منتج..." autocomplete="off">' +
+            '<input type="text" id="globalSearchInput" placeholder="ابحث عن منتج أو باركود..." autocomplete="off">' +
             '<span>' + iconSvg("search") + '</span>' +
           '</div>' +
           '<button type="button" class="btn-icon" id="closeGlobalSearch" aria-label="إغلاق">' + iconSvg("close") + '</button>' +
@@ -106,6 +110,7 @@ function renderHeader() {
   renderSidebarNav(active);
   initMobileNav();
   initGlobalSearch();
+  updateCartBadge();
 }
 
 function renderSidebarNav(activeKey) {
@@ -201,7 +206,7 @@ function initGlobalSearch() {
   openBtn.addEventListener("click", function() {
       overlay.classList.add("open");
       input.value = "";
-      resultsBox.innerHTML = '<div class="empty-search">اكتب اسم المنتج للبحث...</div>';
+      resultsBox.innerHTML = '<div class="empty-search">اكتب اسم المنتج أو الباركود للبحث...</div>';
       setTimeout(() => input.focus(), 100); 
   });
 
@@ -213,45 +218,56 @@ function initGlobalSearch() {
       if(e.target === overlay) overlay.classList.remove("open");
   });
 
-  input.addEventListener("input", async function() {
+  let searchTimeout;
+  input.addEventListener("input", function() {
+      clearTimeout(searchTimeout);
       const query = input.value.trim().toLowerCase();
       if(query.length === 0) {
-          resultsBox.innerHTML = '<div class="empty-search">اكتب اسم المنتج للبحث...</div>';
+          resultsBox.innerHTML = '<div class="empty-search">اكتب اسم المنتج أو الباركود للبحث...</div>';
           return;
       }
 
       resultsBox.innerHTML = '<div class="empty-search">جاري البحث...</div>';
-      const allProducts = await Store.loadAllProductsFromFirebase();
-      const matched = (allProducts || []).filter(p => 
-          (p.name || "").toLowerCase().includes(query) || 
-          (p.description && p.description.toLowerCase().includes(query)) ||
-          (p.variants && p.variants.some(v => String(v).toLowerCase().includes(query)))
-      );
 
-      if(matched.length === 0) {
-          resultsBox.innerHTML = '<div class="empty-search">لا توجد منتجات مطابقة لـ "' + escapeHtml(query) + '"</div>';
-          return;
-      }
+      searchTimeout = setTimeout(async function() {
+          let pool = Store.getProducts();
 
-      resultsBox.innerHTML = matched.map(p => {
-          // جلب صورة مصغرة للبحث باستخدام الدالة الجديدة
-          const img = p.image ? `<img src="${escapeHtml(window.getIkUrl(p.image, 150, 70))}" alt="${escapeHtml(p.name)}">` : `<div class="search-img-placeholder">${iconSvg("box")}</div>`;
-          return `
-              <a href="product.html?id=${encodeURIComponent(p.id)}" class="search-result-item">
-                  <div class="search-item-img">${img}</div>
-                  <div class="search-item-info">
-                      <h4>${escapeHtml(p.name)}</h4>
-                      <span>${formatPrice(p.price)}</span>
-                  </div>
-              </a>
-          `;
-      }).join("");
+          if (!pool || pool.length === 0) {
+              const batch = await Store.loadProductsPage(25, null);
+              pool = batch.products || [];
+          }
+
+          const matched = pool.filter(p => 
+              (p.name || "").toLowerCase().includes(query) || 
+              (p.barcode && String(p.barcode).toLowerCase().includes(query)) ||
+              (p.sku && String(p.sku).toLowerCase().includes(query)) ||
+              (p.description && p.description.toLowerCase().includes(query))
+          ).slice(0, 8);
+
+          if(matched.length === 0) {
+              resultsBox.innerHTML = '<div class="empty-search">لا توجد منتجات مطابقة لـ "' + escapeHtml(query) + '"</div>';
+              return;
+          }
+
+          resultsBox.innerHTML = matched.map(p => {
+              const img = p.image ? `<img src="${escapeHtml(window.getIkUrl(p.image, 150, 70))}" alt="${escapeHtml(p.name)}">` : `<div class="search-img-placeholder">${iconSvg("box")}</div>`;
+              return `
+                  <a href="product.html?id=${encodeURIComponent(p.id)}" class="search-result-item">
+                      <div class="search-item-img">${img}</div>
+                      <div class="search-item-info">
+                          <h4>${escapeHtml(p.name)}</h4>
+                          <span>${formatPrice(p.price)}</span>
+                      </div>
+                  </a>
+              `;
+          }).join("");
+      }, 300);
   });
 }
 
 function renderFooter() {
-  const mount = document.getElementById("site-footer");
-  if (!mount) return;
+  const footerMount = document.getElementById("site-footer");
+  if (!footerMount) return;
   const rawSettings = Store.getSettings() || {};
   const settings = {
     storeName: escapeHtml(rawSettings.storeName || "متجرك الإلكتروني"),
@@ -264,7 +280,7 @@ function renderFooter() {
   };
   const categories = (Store.getCategories() || []).slice(0, 5);
   const catLinks = categories.map(function(c){ return '<li><a href="products.html?cat=' + encodeURIComponent(c.id) + '">' + escapeHtml(c.name) + '</a></li>'; }).join("");
-  mount.innerHTML =
+  footerMount.innerHTML =
     '<footer class="site-footer">' +
       '<div class="container">' +
         '<div class="footer-grid">' +
@@ -306,13 +322,30 @@ function initMobileNav() {
   });
 }
 
-function updateCartBadge() {
+// دالة تحديث السلة المحسنة والدقيقة لمنع أي أرقام فانتوم
+window.updateCartBadge = function() {
   const el = document.getElementById("cartCount");
   if (!el) return;
-  const count = Store.cartCount();
-  el.textContent = count;
-  el.style.display = count > 0 ? "flex" : "none";
-}
+  
+  let count = 0;
+  if (typeof Store !== "undefined" && typeof Store.getCart === "function") {
+    const cart = Store.getCart() || [];
+    count = cart.reduce(function(sum, item) {
+      const q = Number(item && item.qty);
+      return sum + (q > 0 ? q : 0);
+    }, 0);
+  }
+
+  if (count > 0) {
+    el.textContent = count;
+    el.style.display = "inline-flex";
+    el.classList.add("has-items");
+  } else {
+    el.textContent = "";
+    el.style.display = "none";
+    el.classList.remove("has-items");
+  }
+};
 
 function showToast(message, type = 'success') {
   let toast = document.getElementById("appToast");
@@ -359,17 +392,24 @@ function initBackToTop() {
   });
 }
 
-function fixRelativePaths(scope) { /* no-op */ }
-
 document.addEventListener("DOMContentLoaded", function () {
   renderHeader();
   renderFooter();
-  updateCartBadge();
+  window.updateCartBadge();
   initBackToTop();
 });
-document.addEventListener("cart:updated", updateCartBadge);
+
+// ضمان تحديث العداد الفوري عند العودة بالمتصفح
+window.addEventListener("pageshow", function() {
+  window.updateCartBadge();
+});
+
+document.addEventListener("cart:updated", function() {
+  window.updateCartBadge();
+});
+
 document.addEventListener("store:synced", function () {
   renderHeader();
   renderFooter();
-  updateCartBadge();
+  window.updateCartBadge();
 });
