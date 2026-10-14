@@ -39,8 +39,8 @@ const STORE_CONFIG = {
   firebaseDatabaseURL: "https://cosmatic-279e5-default-rtdb.europe-west1.firebasedatabase.app/",
 
   // === ImgBB (رفع الصور) ===
-  imgbbApiKey: "",
+  imgbbApiKey: "820a1a52d1b835874a9200fe7d3bb6b3",
 
   // === ImageKit (تحسين وضغط الصور عبر CDN) ===
-  imageKitEndpoint: "https://ik.imagekit.io/test3wf"
+  imageKitEndpoint: ""
 };
