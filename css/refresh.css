@@ -66,3 +66,46 @@
 @media(max-width:650px){
   #backToTopBtn{bottom:20px;right:16px}
 }
+
+/* ==========================================================================
+   Performance & first-visit UX layer (added)
+   ========================================================================== */
+
+/* ---- No layout shift: reserve the header's height before app.js renders it ---- */
+#site-header{min-height:73px;background:var(--surface)}
+#site-header>.site-header{animation:chromeIn .25s ease both}
+@keyframes chromeIn{from{opacity:0}to{opacity:1}}
+
+/* ---- Cross-page fade (progressive enhancement, Chrome/Edge/Safari 18+) ---- */
+@view-transition{navigation:auto}
+::view-transition-old(root),::view-transition-new(root){animation-duration:.16s}
+
+/* ---- Skeletons: cards, category chips, text lines ---- */
+.skeleton-card{box-shadow:none}
+.skeleton-card.product-card{min-height:0;padding:0}
+.skeleton-card.product-card::before{content:"";display:block;width:100%;aspect-ratio:var(--card-image-ratio);background:linear-gradient(90deg,var(--surface-2) 25%,var(--bg) 50%,var(--surface-2) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite}
+.skeleton-card.product-card::after{content:"";display:block;height:70px;margin:12px;border-radius:var(--radius-sm);background:linear-gradient(90deg,var(--surface-2) 25%,var(--bg) 50%,var(--surface-2) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite}
+.skeleton-chip{pointer-events:none}
+.skeleton-chip .cat-icon,.skeleton-chip .name{background:linear-gradient(90deg,var(--surface-2) 25%,var(--bg) 50%,var(--surface-2) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-color:transparent}
+.skeleton-chip .name{display:block;height:14px;width:70%;border-radius:var(--radius-sm)}
+.skeleton-line{display:block;height:14px;border-radius:var(--radius-sm);background:linear-gradient(90deg,var(--surface-2) 25%,var(--bg) 50%,var(--surface-2) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite}
+.detail-skeleton{display:grid;grid-template-columns:1fr 1fr;gap:28px}
+.detail-skeleton .skeleton-img-big{aspect-ratio:1/1;border-radius:var(--r-card)}
+@media(max-width:767px){.detail-skeleton{grid-template-columns:1fr}}
+
+/* ---- Images fade in once decoded (no pop-in); JS adds .is-loaded ---- */
+.product-media>img.img-fade:not(.is-loaded),.promo-slide img.img-fade:not(.is-loaded),.detail-gallery-img.img-fade:not(.is-loaded){opacity:0}
+.promo-slide img.img-fade,.detail-gallery-img.img-fade{transition:opacity .35s ease}
+
+/* ---- Retry / error blocks ---- */
+.load-error{grid-column:1/-1;text-align:center;padding:28px 12px;color:var(--ink-600)}
+.load-error .btn{margin-top:10px}
+
+/* ---- Cheaper rendering for below-the-fold sections ---- */
+main>section:nth-of-type(n+4),.site-footer{content-visibility:auto;contain-intrinsic-size:auto 520px}
+
+/* ---- Respect reduced-motion preferences ---- */
+@media(prefers-reduced-motion:reduce){
+  ::view-transition-group(*),::view-transition-old(*),::view-transition-new(*){animation:none!important}
+  .skeleton-card.product-card::before,.skeleton-card.product-card::after,.skeleton-chip .cat-icon,.skeleton-chip .name,.skeleton-line{animation:none}
+}
